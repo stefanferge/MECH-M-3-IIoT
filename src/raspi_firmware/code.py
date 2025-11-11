@@ -57,6 +57,16 @@ except ImportError:  # pragma: no cover - running off-device
     wifi = None
 
 try:
+    import rtc  # type: ignore
+except ImportError:  # pragma: no cover - running off-device
+    rtc = None
+
+try:
+    import adafruit_ntp  # type: ignore
+except ImportError:  # pragma: no cover - running off-device
+    adafruit_ntp = None
+
+try:
     from adafruit_minimqtt.adafruit_minimqtt import MQTT  # type: ignore
 except ImportError:  # pragma: no cover - running off-device
     MQTT = None
@@ -396,9 +406,11 @@ class MqttClient:
         self.client_id = config.get("device_id", "pico-sensor")
         self.keep_alive = int(config.get("mqtt_keepalive", 60))
         self.use_ssl = bool(config.get("mqtt_use_ssl", False))
+        self.loop_timeout = float(config.get("mqtt_loop_timeout", 1.0))
         self._mqtt_client: Any | None = None
         self._socket_pool: Any | None = config.get("socket_pool")
         self._last_error: Exception | None = None
+        self._status: str = "offline"
 
     def set_socket_pool(self, socket_pool: Any):
         """
@@ -451,7 +463,20 @@ class MqttClient:
         if self._mqtt_client is None:
             raise RuntimeError("MQTT-Client ist nicht verbunden.")
 
-        payload = json.dumps(data)
+        # Standard-JSON mit UTC-ISO8601 Zeitstempel und Einheiten
+        def _iso8601_utc() -> str:
+            tm = getattr(time, "gmtime", time.localtime)()
+            y, m, d, hh, mm, ss, *_ = tm
+            return f"{y:04d}-{m:02d}-{d:02d}T{hh:02d}:{mm:02d}:{ss:02d}Z"
+
+        payload_obj = {
+            "device_id": self.client_id,
+            "status": self._status or "ok",
+            "timestamp": _iso8601_utc(),
+            "temperature": {"value": float(data.get("temperature")), "unit": "°C"},
+            "humidity": {"value": float(data.get("humidity")), "unit": "%"},
+        }
+        payload = json.dumps(payload_obj)
         try:
             self._mqtt_client.publish(self.telemetry_topic, payload)
         except Exception as exc:  # pragma: no cover - abhängig vom Netzwerk
@@ -471,6 +496,7 @@ class MqttClient:
             raise RuntimeError("MQTT-Client ist nicht verbunden.")
         try:
             self._mqtt_client.publish(self.status_topic, status, retain=True)
+            self._status = status
         except Exception as exc:  # pragma: no cover - abhängig vom Netzwerk
             self._last_error = exc
             raise
@@ -483,7 +509,7 @@ class MqttClient:
         if self._mqtt_client is None:
             return
         try:
-            self._mqtt_client.loop(0.1)
+            self._mqtt_client.loop(self.loop_timeout)
         except Exception as exc:  # pragma: no cover - abhängig vom Netzwerk
             self._last_error = exc
             raise
@@ -769,11 +795,22 @@ print("Starte yourmuesli.at IoT-Umgebung…")
 cfg = ConfigManager("/settings.toml")
 try:
     print("settings.toml Path:", cfg.filepath)
-    print("exists?", os.path.exists(cfg.filepath))
+
+    # exists? – CircuitPython-Variante ohne os.path:
+    def _exists(p: str) -> bool:
+        try:
+            # stat wirft OSError, falls Datei fehlt
+            os.stat(p)  # type: ignore[attr-defined]
+            return True
+        except Exception:
+            return False
+
+    print("exists?", _exists(cfg.filepath))
     print("cwd:", os.getcwd())
     print("root files:", os.listdir("/"))
 except Exception as _dbg:
     print("Debug check failed:", _dbg)
+
 try:
   settings = cfg.load_settings()
 except Exception as e:
@@ -811,9 +848,23 @@ if settings.get("wifi_ssid"):
     net = NetworkManager(settings.get("wifi_ssid", ""), settings.get("wifi_password", ""))
     print("Verbinde mit WLAN…")
     if not net.connect():
-      print("WLAN-Verbindung fehlgeschlagen – fahre ohne Netzwerk fort.")
+      print("WLAN-Verbindung fehlgeschlagen - fahre ohne Netzwerk fort.")
     else:
       print("WLAN OK:", net.get_ip())
+      # NTP: Uhr in UTC mit adafruit_ntp setzen (falls Bibliothek vorhanden)
+      try:
+        if adafruit_ntp is not None and rtc is not None:
+          pool = net.get_socket_pool()
+          ntp_server = settings.get("ntp_server", "pool.ntp.org")
+          ntp_client = adafruit_ntp.NTP(pool, server=ntp_server)
+          rtc.RTC().datetime = ntp_client.datetime
+          tm = getattr(time, "gmtime", time.localtime)()
+          y, m, d, hh, mm, ss, *_ = tm
+          print(f"NTP gesetzt: {y:04d}-{m:02d}-{d:02d}T{hh:02d}:{mm:02d}:{ss:02d}Z")
+        else:
+          print("NTP nicht verfügbar – Bibliothek oder rtc fehlt.")
+      except Exception as e:
+        print("NTP-Fehler:", e)
   except Exception as e:
     print("WLAN-Init-Fehler:", e)
     net = None
@@ -834,7 +885,7 @@ if settings.get("broker_address"):
       mqtt_cfg["socket_pool"] = net.get_socket_pool()
     mqtt = MqttClient(mqtt_cfg)
     mqtt.connect()
-    mqtt.publish_status("online")
+    mqtt.publish_status("ok")
     print("MQTT verbunden")
   except Exception as e:
     print("MQTT-Verbindungsfehler:", e)
@@ -865,6 +916,10 @@ while True:
         mqtt.loop()
       except Exception as e:
         print("MQTT loop Fehler:", e)
+        try:
+          mqtt.publish_status("error")
+        except Exception:
+          pass
     if web is not None:
       try:
         web.poll()
@@ -886,12 +941,26 @@ while True:
         # optional an MQTT senden
         if mqtt is not None and settings.get("telemetry_topic"):
           try:
+            # Erfolgreiche Messung: Status auf ok setzen, dann senden
+            try:
+              mqtt.publish_status("ok")
+            except Exception:
+              pass
             mqtt.publish_telemetry(data)
           except Exception as e:
             print("MQTT publish Fehler:", e)
+            try:
+              mqtt.publish_status("error")
+            except Exception:
+              pass
       else:
         # Fehlermeldung aus Sensor-Layer anzeigen
         print("Sensor liefert keine Werte:", sensor.last_error)
+        if mqtt is not None:
+          try:
+            mqtt.publish_status("error")
+          except Exception:
+            pass
       last_send = now
 
     # kleine Pause, damit die Schleife CPU schont

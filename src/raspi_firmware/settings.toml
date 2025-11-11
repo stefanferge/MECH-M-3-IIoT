@@ -9,7 +9,7 @@
 # --- Geräteeinstellungen ---
 # Eindeutiger Name für diesen Sensor, wird in den MQTT-Nachrichten verwendet.
 # z.B. "prod-hall-3-vomp"
-device_id = "temperature"
+device_id = "Pico-Sensor-Ferge-Peter"
 names = "{Ferge-Peter}"
 
 # Optionaler, menschenlesbarer Standort für das Web-Interface.
@@ -19,8 +19,8 @@ location = "Produktionshalle 1, Innsbruck"
 # --- WLAN-Einstellungen ---
 # SSID (Name) und Passwort des lokalen WLAN-Netzwerks.
 # WICHTIG: Diese müssen vor Ort eingetragen werden!
-wifi_ssid = "iot-wlan-2024"
-wifi_password = "mci_lecture&42"
+wifi_ssid = "IBKPongau"
+wifi_password = "JohannGoldegg6020!"
 
 
 # --- MQTT Broker Einstellungen ---
@@ -28,11 +28,15 @@ wifi_password = "mci_lecture&42"
 broker_address = "158.180.44.197"
 broker_port = 1883
 
+# Logins:
+mqtt_username = "bobm"
+mqtt_password = "letmein"
+
 # Topics sind wie "Kanäle", auf denen Nachrichten gesendet werden.
 # Das Haupt-Topic für die Sensordaten (Temperatur, Luftfeuchtigkeit).
-telemetry_topic = "iiot/group/telemetry"
+telemetry_topic = "iiot/group/ferge-peter/sensor/temperature"
 # Das Topic für Statusmeldungen (z.B. "online", "rebooting").
-status_topic = "iiot/group/status"
+status_topic = "iiot/group/ferge-peter/sensor/status"
 
 
 # --- Sensor & Applikations-Einstellungen ---
