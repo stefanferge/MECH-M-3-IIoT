@@ -400,6 +400,12 @@ class MqttClient:
         self.broker = config.get("broker_address")
         self.port = int(config.get("broker_port", 1883))
         self.telemetry_topic = config.get("telemetry_topic")
+        self.temperature_topic = config.get("temperature_topic") or (
+            f"{self.telemetry_topic}/temperature" if self.telemetry_topic else None
+        )
+        self.humidity_topic = config.get("humidity_topic") or (
+            f"{self.telemetry_topic}/humidity" if self.telemetry_topic else None
+        )
         self.status_topic = config.get("status_topic")
         self.username = config.get("mqtt_username")
         self.password = config.get("mqtt_password")
@@ -442,7 +448,8 @@ class MqttClient:
                 is_ssl=self.use_ssl,
             )
             if self.status_topic:
-                self._mqtt_client.will_set(self.status_topic, "offline", retain=True)
+                offline_payload = self._build_status_payload("offline")
+                self._mqtt_client.will_set(self.status_topic, offline_payload, retain=True)
 
         try:
             self._mqtt_client.connect()
@@ -451,37 +458,64 @@ class MqttClient:
             self._last_error = exc
             raise
 
+    @staticmethod
+    def _iso8601_utc() -> str:
+        """
+        Liefert einen UTC-Zeitstempel im ISO-8601-Format.
+        """
+        tm = getattr(time, "gmtime", time.localtime)()
+        y, m, d, hh, mm, ss, *_ = tm
+        return f"{y:04d}-{m:02d}-{d:02d}T{hh:02d}:{mm:02d}:{ss:02d}Z"
+
     def publish_telemetry(self, data: dict):
         """
-        Formatiert die Sensordaten in ein JSON-Payload und sendet sie
-        an das definierte Telemetrie-Topic.
+        Sendet Temperatur- und Luftfeuchtigkeitswerte auf getrennte Topics,
+        jeweils inklusive Wert, Einheit und Zeitstempel.
 
         :param data: Das Dictionary mit den Sensordaten.
         """
-        if not self.telemetry_topic:
-            raise ValueError("Kein Telemetrie-Topic konfiguriert.")
+        if not self.temperature_topic or not self.humidity_topic:
+            raise ValueError("Es sind keine Topics für Temperatur und/oder Luftfeuchtigkeit konfiguriert.")
         if self._mqtt_client is None:
             raise RuntimeError("MQTT-Client ist nicht verbunden.")
 
-        # Standard-JSON mit UTC-ISO8601 Zeitstempel und Einheiten
-        def _iso8601_utc() -> str:
-            tm = getattr(time, "gmtime", time.localtime)()
-            y, m, d, hh, mm, ss, *_ = tm
-            return f"{y:04d}-{m:02d}-{d:02d}T{hh:02d}:{mm:02d}:{ss:02d}Z"
-
-        payload_obj = {
-            "device_id": self.client_id,
-            "status": self._status or "ok",
-            "timestamp": _iso8601_utc(),
-            "temperature": {"value": float(data.get("temperature")), "unit": "°C"},
-            "humidity": {"value": float(data.get("humidity")), "unit": "%"},
-        }
-        payload = json.dumps(payload_obj)
         try:
-            self._mqtt_client.publish(self.telemetry_topic, payload)
+            temperature_value = float(data.get("temperature"))
+            humidity_value = float(data.get("humidity"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Ungültige Sensordaten für Temperatur oder Luftfeuchtigkeit.") from exc
+
+        timestamp = self._iso8601_utc()
+        readings = (
+            (self.temperature_topic, temperature_value, "°C"),
+            (self.humidity_topic, humidity_value, "%"),
+        )
+
+        try:
+            for topic, value, unit in readings:
+                payload_obj = {
+                    "timestamp": timestamp,
+                    "device_id": self.client_id,
+                    "value": value,
+                    "unit": unit,
+                }
+                payload = json.dumps(payload_obj)
+                self._mqtt_client.publish(topic, payload)
         except Exception as exc:  # pragma: no cover - abhängig vom Netzwerk
             self._last_error = exc
             raise
+
+    def _build_status_payload(self, status: str) -> str:
+        """
+        Baut das Status-Payload als JSON-String auf.
+        """
+        return json.dumps(
+            {
+                "timestamp": self._iso8601_utc(),
+                "device_id": self.client_id,
+                "status": status,
+            }
+        )
 
     def publish_status(self, status: str):
         """
@@ -494,8 +528,9 @@ class MqttClient:
             return
         if self._mqtt_client is None:
             raise RuntimeError("MQTT-Client ist nicht verbunden.")
+        payload = self._build_status_payload(status)
         try:
-            self._mqtt_client.publish(self.status_topic, status, retain=True)
+            self._mqtt_client.publish(self.status_topic, payload, retain=True)
             self._status = status
         except Exception as exc:  # pragma: no cover - abhängig vom Netzwerk
             self._last_error = exc
@@ -556,7 +591,7 @@ class WebServer:
     Stellt eine einfache HTTP-Schnittstelle zur Fernkonfiguration bereit.
     """
 
-    def __init__(self, config_manager: ConfigManager):
+    def __init__(self, config_manager: ConfigManager, network_manager: Any | None = None, mqtt_client: Any | None = None):
         """
         Initialisiert den Webserver.
 
@@ -569,6 +604,9 @@ class WebServer:
         self._listener: Any | None = None
         self._last_client: Any | None = None
         self._last_error: Exception | None = None
+        self._pending_reset = False
+        self.network_manager = network_manager
+        self.mqtt_client = mqtt_client
 
     def start(self):
         """
@@ -613,11 +651,70 @@ class WebServer:
             return
 
         try:
-            request = client.recv(2048)
-            if not request:
-                return
-            response = self._handle_request(request.decode("utf-8", "ignore"))
-            client.send(response)
+            # Kurz auf eingehende Daten warten und bis zum Headerende lesen
+            try:
+                client.settimeout(1)
+            except Exception:
+                pass
+            buf = bytearray()
+            header_end = -1
+            for _ in range(50):  # ~1s worst-case bei settimeout
+                try:
+                    chunk = client.recv(1024)
+                except Exception as _:
+                    break
+                if not chunk:
+                    break
+                buf.extend(chunk)
+                idx = buf.find(b"\r\n\r\n")
+                if idx != -1:
+                    header_end = idx
+                    break
+
+            # Falls kein Headerende gefunden, dennoch versuchen zu parsen
+            data = bytes(buf)
+
+            # Content-Length prüfen und ggf. Body nachladen (PUT/POST)
+            try:
+                header_text = data.decode("utf-8", "ignore")
+                first_line = header_text.split("\r\n", 1)[0]
+                parts = first_line.split(" ")
+                method = parts[0] if len(parts) >= 1 else "GET"
+                content_length = 0
+                for line in header_text.split("\r\n"):
+                    if line.lower().startswith("content-length:"):
+                        try:
+                            content_length = int(line.split(":", 1)[1].strip())
+                        except Exception:
+                            content_length = 0
+                        break
+                if header_end != -1 and content_length > 0 and method in ("POST", "PUT"):
+                    have = len(data) - (header_end + 4)
+                    to_read = content_length - max(0, have)
+                    while to_read > 0:
+                        try:
+                            chunk = client.recv(min(1024, to_read))
+                        except Exception:
+                            break
+                        if not chunk:
+                            break
+                        buf.extend(chunk)
+                        to_read -= len(chunk)
+                    data = bytes(buf)
+            except Exception:
+                pass
+
+            response = self._handle_request(data.decode("utf-8", "ignore"))
+            total = len(response)
+            sent = 0
+            while sent < total:
+                try:
+                    n = client.send(response[sent:sent+1024])
+                except Exception:
+                    break
+                if not n:
+                    break
+                sent += n
         except Exception as exc:  # pragma: no cover - hardwareabhängig
             self._last_error = exc
         finally:
@@ -625,6 +722,14 @@ class WebServer:
                 client.close()
             except Exception:  # pragma: no cover - best effort
                 pass
+            # optionaler Neustart nach API-Antwort
+            if self._pending_reset:
+                try:
+                    self._pending_reset = False
+                    if microcontroller is not None:
+                        microcontroller.reset()
+                except Exception:
+                    pass
 
     def _handle_request(self, request: str) -> bytes:
         """
@@ -635,9 +740,15 @@ class WebServer:
         if not lines:
             return self._http_response(400, "Bad Request")
 
+        # Robuste Request-Line-Parsing (z. B. "GET /path HTTP/1.1")
         try:
-            method, path, _ = lines[0].split(" ")
-        except ValueError:
+            first_line = lines[0].strip()
+            parts = first_line.split()
+            if len(parts) < 2:
+                return self._http_response(400, "Bad Request")
+            method = parts[0]
+            path = parts[1]
+        except Exception:
             return self._http_response(400, "Bad Request")
 
         headers: dict[str, str] = {}
@@ -655,39 +766,153 @@ class WebServer:
                 body += line + "\n"
         body = body.rstrip("\n")
 
-        if path != "/":
-            return self._http_response(404, "Not Found")
+        # REST JSON API
+        if path.startswith("/api/"):
+            if method == "OPTIONS":
+                return self._http_response(204, "", headers=self._cors_headers())
+            if path == "/api/config":
+                if method == "GET":
+                    return self._api_get_config()
+                if method == "PUT":
+                    return self._api_put_config(body, headers)
+                return self._json_error(405, "method_not_allowed", "Method Not Allowed")
+            if path == "/api/status":
+                if method == "GET":
+                    return self._api_get_status()
+                return self._json_error(405, "method_not_allowed", "Method Not Allowed")
+            return self._json_error(404, "not_found", "Not Found")
 
-        if method == "GET":
-            return self._handle_get_request()
-        if method == "POST":
-            return self._handle_post_request(body, headers)
-        return self._http_response(405, "Method Not Allowed")
+        # HTML UI
+        if path == "/":
+            if method == "GET":
+                return self._handle_get_request()
+            if method == "POST":
+                return self._handle_post_request(body, headers)
+            return self._http_response(405, "Method Not Allowed")
+        return self._http_response(404, "Not Found")
 
     def _handle_get_request(self, _request: Any | None = None) -> bytes:
         """
         Erstellt eine HTML-Seite mit den aktuellen Einstellungen.
         """
-        settings = self.config_manager.load_settings()
+        try:
+            settings = self.config_manager.load_settings()
+        except Exception as exc:
+            # Fällt zurück auf leere Anzeige statt 500
+            settings = {}
+        
         rows = []
         for key, value in settings.items():
-            escaped_value = str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
-            rows.append(
-                f"<label>{key}: <input type='text' name='{key}' value=\"{escaped_value}\"></label><br>"
+            escaped_value = (
+                str(value)
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace('"', "&quot;")
             )
-        rows_html = "\n".join(rows)
+            rows.append(
+                f"<label style='display:block;margin:6px 0'>{key}: "
+                f"<input type='text' name='{key}' value=\"{escaped_value}\"></label>"
+            )
+        rows_html = "\n".join(rows) if rows else "<p><em>Keine Einstellungen gefunden.</em></p>"
+
         html = (
             "<!DOCTYPE html>"
-            "<html><head><meta charset='utf-8'><title>IoT Einstellungen</title></head>"
+            "<html><head><meta charset='utf-8'><title>IoT Einstellungen</title>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            "<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;"
+            "margin:20px;max-width:720px}.btn{padding:8px 12px;border:1px solid #ccc;"
+            "border-radius:8px;cursor:pointer}</style></head>"
             "<body>"
             "<h1>Geräteeinstellungen</h1>"
-            "<form method='POST'>"
+            "<form method='POST' enctype='application/x-www-form-urlencoded'>"
             f"{rows_html}"
-            "<button type='submit'>Speichern &amp; Neustart</button>"
+            "<button class='btn' type='submit'>Speichern &amp; Neustart</button>"
             "</form>"
+            "<hr>"
+            "<p>Tipp: API-Status unter <code>/api/status</code>, Config lesen unter "
+            "<code>/api/config</code>, ändern via <code>PUT /api/config</code> (JSON).</p>"
             "</body></html>"
         )
+
         return self._http_response(200, html, content_type="text/html")
+
+    def _cors_headers(self) -> dict[str, str]:
+        return {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET,PUT,POST,OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+        }
+
+    def _api_get_config(self) -> bytes:
+        try:
+            settings = self.config_manager.load_settings()
+        except Exception as exc:
+            return self._json_error(500, "internal_error", str(exc))
+        body = json.dumps({"config": settings})
+        return self._http_response(200, body, content_type="application/json", headers=self._cors_headers())
+
+    def _api_put_config(self, body: str, headers: dict[str, str]) -> bytes:
+        ct = headers.get("content-type", "").lower()
+        if "application/json" not in ct:
+            return self._json_error(415, "unsupported_media_type", "Expected application/json")
+        try:
+            data = json.loads(body) if body else {}
+        except Exception:
+            return self._json_error(400, "invalid_json", "Body is not valid JSON")
+
+        if not isinstance(data, dict):
+            return self._json_error(400, "invalid_request", "JSON object expected")
+
+        updates = data.get("config") if "config" in data else data
+        if not isinstance(updates, dict) or not updates:
+            return self._json_error(400, "invalid_request", "No config fields provided")
+
+        try:
+            settings = self.config_manager.load_settings().copy()
+            settings.update(updates)
+            serialized = self.config_manager._dump_toml(settings)
+            with open(self.config_manager.filepath, "wb") as f:
+                f.write(serialized)
+            self._pending_reset = True
+        except Exception as exc:
+            return self._json_error(500, "internal_error", str(exc))
+
+        body_resp = json.dumps({"status": "accepted", "rebooting": True})
+        headers = self._cors_headers()
+        return self._http_response(202, body_resp, content_type="application/json", headers=headers)
+
+    def _api_get_status(self) -> bytes:
+        tm = getattr(time, "gmtime", time.localtime)()
+        y, m, d, hh, mm, ss, *_ = tm
+        iso = f"{y:04d}-{m:02d}-{d:02d}T{hh:02d}:{mm:02d}:{ss:02d}Z"
+
+        device_id = "unknown"
+        try:
+            cfg = self.config_manager.load_settings()
+            device_id = str(cfg.get("device_id", "unknown"))
+        except Exception:
+            pass
+
+        ip = None
+        if self.network_manager is not None:
+            try:
+                ip = self.network_manager.get_ip()
+            except Exception:
+                ip = None
+        status = None
+        if self.mqtt_client is not None:
+            try:
+                status = getattr(self.mqtt_client, "_status", None)
+            except Exception:
+                status = None
+        body = json.dumps({
+            "device_id": device_id,
+            "timestamp": iso,
+            "status": status or "ok",
+            "ip": ip,
+        })
+        return self._http_response(200, body, content_type="application/json", headers=self._cors_headers())
 
     def _handle_post_request(self, body: str, headers: dict[str, str] | None = None) -> bytes:
         """
@@ -776,6 +1001,11 @@ class WebServer:
         header_lines.append("")
         response_str = "\r\n".join(header_lines) + "\r\n" + body
         return response_str.encode("utf-8")
+
+    def _json_error(self, status: int, code: str, message: str) -> bytes:
+        body = json.dumps({"error": {"code": code, "message": message}})
+        headers = self._cors_headers()
+        return self._http_response(status, body, content_type="application/json", headers=headers)
 
     @property
     def last_error(self) -> Exception | None:
@@ -897,7 +1127,7 @@ else:
 web = None
 if net is not None:
   try:
-    web = WebServer(cfg)
+    web = WebServer(cfg, network_manager=net, mqtt_client=mqtt)
     web.start()
     print("Webserver läuft auf Port 80")
   except Exception as e:

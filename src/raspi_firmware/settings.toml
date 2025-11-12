@@ -19,8 +19,11 @@ location = "Produktionshalle 1, Innsbruck"
 # --- WLAN-Einstellungen ---
 # SSID (Name) und Passwort des lokalen WLAN-Netzwerks.
 # WICHTIG: Diese müssen vor Ort eingetragen werden!
-wifi_ssid = "IBKPongau"
-wifi_password = "JohannGoldegg6020!"
+#wifi_ssid = "IBKPongau"
+#wifi_password = "JohannGoldegg6020!"
+
+wifi_ssid = "iot-wlan-2024"
+wifi_password = "mci_lecture&42"
 
 
 # --- MQTT Broker Einstellungen ---
@@ -34,14 +37,14 @@ mqtt_password = "letmein"
 
 # Topics sind wie "Kanäle", auf denen Nachrichten gesendet werden.
 # Das Haupt-Topic für die Sensordaten (Temperatur, Luftfeuchtigkeit).
-telemetry_topic = "iiot/group/ferge-peter/sensor/temperature"
+telemetry_topic = "iiot/group/ferge-peter/sensor"
 # Das Topic für Statusmeldungen (z.B. "online", "rebooting").
 status_topic = "iiot/group/ferge-peter/sensor/status"
 
 
 # --- Sensor & Applikations-Einstellungen ---
 # Das Intervall in Sekunden, in dem Daten gelesen und gesendet werden.
-reading_interval_seconds = 60
+reading_interval_seconds = 1
 
 # Der GPIO Pin des Raspberry Pi Pico, an dem das Datenkabel des
 # DHT22-Sensors angeschlossen ist (z.B. GP15).
