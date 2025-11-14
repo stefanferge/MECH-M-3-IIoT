@@ -1,0 +1,15 @@
+apiVersion: 1
+datasources:
+  - name: InfluxDB
+    uid: influxdb
+    type: influxdb
+    access: proxy
+    isDefault: true
+    editable: true
+    jsonData:
+      httpMode: POST
+      version: Flux
+      organization: "${INFLUXDB_ORG}"
+      defaultBucket: "${INFLUXDB_BUCKET}"
+    secureJsonData:
+      token: "${INFLUXDB_TOKEN}"

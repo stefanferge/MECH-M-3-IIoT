@@ -1,0 +1,77 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: iiot-mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./configs/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-h", "localhost", "-t", "$$SYS/#", "-C", "1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  influxdb:
+    image: influxdb:2.7
+    container_name: iiot-influxdb
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUXDB_ADMIN_USER}
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_ADMIN_PASSWORD}
+      - DOCKER_INFLUXDB_INIT_ORG=${INFLUXDB_ORG}
+      - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUXDB_BUCKET}
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_TOKEN}
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+      - influxdb-config:/etc/influxdb2
+
+  telegraf:
+    image: telegraf:1.28
+    container_name: iiot-telegraf
+    restart: unless-stopped
+    depends_on:
+      - mosquitto
+      - influxdb
+    environment:
+      - TELEGRAF_INFLUX_TOKEN=${INFLUXDB_TOKEN}
+      - TELEGRAF_INFLUX_ORG=${INFLUXDB_ORG}
+      - TELEGRAF_INFLUX_BUCKET=${INFLUXDB_BUCKET}
+      - MQTT_BROKER=mosquitto:1883
+      - MQTT_TELEMETRY_TOPICS=${MQTT_TELEMETRY_TOPICS}
+      - MQTT_STATUS_TOPICS=${MQTT_STATUS_TOPICS}
+    volumes:
+      - ./configs/telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: iiot-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - influxdb
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
+      - INFLUXDB_ORG=${INFLUXDB_ORG}
+      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./configs/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./configs/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./configs/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+volumes:
+  mosquitto-data:
+  mosquitto-log:
+  influxdb-data:
+  influxdb-config:
+  grafana-data:

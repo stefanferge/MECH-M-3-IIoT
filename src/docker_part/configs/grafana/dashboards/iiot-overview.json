@@ -1,0 +1,120 @@
+{
+  "uid": "iiot-overview",
+  "title": "IIoT Sensor Overview",
+  "schemaVersion": 38,
+  "version": 1,
+  "editable": true,
+  "style": "dark",
+  "refresh": "10s",
+  "tags": ["iiot", "sensors"],
+  "time": {"from": "now-6h", "to": "now"},
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Temperaturverlauf",
+      "datasource": {"type": "influxdb", "uid": "influxdb"},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 0},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"sensor_readings\")\n  |> filter(fn: (r) => r[\"_field\"] == \"value\")\n  |> filter(fn: (r) => r[\"unit\"] == \"°C\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"temperature\")"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Luftfeuchtigkeit",
+      "datasource": {"type": "influxdb", "uid": "influxdb"},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 0},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"sensor_readings\")\n  |> filter(fn: (r) => r[\"_field\"] == \"value\")\n  |> filter(fn: (r) => r[\"unit\"] == \"%\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"humidity\")"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Sensoren online (letzte 15 min)",
+      "datasource": {"type": "influxdb", "uid": "influxdb"},
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 9},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0
+        }
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: -15m)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"sensor_status\")\n  |> filter(fn: (r) => r[\"_field\"] == \"status_code\")\n  |> group(columns: [\"device_id\"])\n  |> last()\n  |> filter(fn: (r) => r[\"_value\"] == 1)\n  |> count()"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Letzte Sensorzustände",
+      "datasource": {"type": "influxdb", "uid": "influxdb"},
+      "gridPos": {"h": 6, "w": 18, "x": 6, "y": 9},
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"displayMode": "color-text"}
+        }
+      },
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: v.defaultBucket)\n  |> range(start: -7d)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"sensor_status\")\n  |> group(columns: [\"device_id\"])\n  |> last()\n  |> pivot(rowKey: [\"device_id\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> keep(columns: [\"_time\", \"device_id\", \"status\", \"status_code\"])\n  |> sort(columns: [\"_time\"], desc: true)"
+        }
+      ]
+    }
+  ]
+}
