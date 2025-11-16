@@ -6,6 +6,7 @@ datasources:
     access: proxy
     isDefault: true
     editable: true
+    url: http://influxdb:8086
     jsonData:
       httpMode: POST
       version: Flux

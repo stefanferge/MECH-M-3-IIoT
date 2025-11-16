@@ -43,9 +43,11 @@ services:
       - TELEGRAF_INFLUX_TOKEN=${INFLUXDB_TOKEN}
       - TELEGRAF_INFLUX_ORG=${INFLUXDB_ORG}
       - TELEGRAF_INFLUX_BUCKET=${INFLUXDB_BUCKET}
-      - MQTT_BROKER=mosquitto:1883
+      - MQTT_BROKER=${MQTT_BROKER}
       - MQTT_TELEMETRY_TOPICS=${MQTT_TELEMETRY_TOPICS}
       - MQTT_STATUS_TOPICS=${MQTT_STATUS_TOPICS}
+      - MQTT_USERNAME=${MQTT_USERNAME}
+      - MQTT_PASSWORD=${MQTT_PASSWORD}
     volumes:
       - ./configs/telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
 

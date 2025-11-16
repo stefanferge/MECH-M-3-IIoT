@@ -2,7 +2,7 @@
 
 Dieses Verzeichnis enthält die containerisierte Referenzlösung, die die Sensordaten des Raspberry Pi Pico (oder weiterer MQTT-Knoten) aufnimmt, historisiert und visualisiert. Sie besteht aus:
 
-- **Mosquitto** (MQTT-Broker) – empfängt alle Sensordaten.
+- **Mosquitto** (MQTT-Broker) – optionaler lokaler Broker; das Standard-Setup lauscht direkt auf dem externen Broker aus `.env`.
 - **Telegraf** – leichtgewichtiger Ingest-Service, der MQTT-Messages automatisch nach InfluxDB schreibt.
 - **InfluxDB 2.x** – Zeitreihen-Datenbank inklusive Auth, Buckets und Token.
 - **Grafana** – vorkonfigurierte Dashboards für Zeitreihen und Sensor-Übersichten.
@@ -33,7 +33,8 @@ Dieses Verzeichnis enthält die containerisierte Referenzlösung, die die Sensor
 
    Relevante Variablen:
    - `INFLUXDB_*`: Organisation, Bucket, Admin-User/-Passwort, API-Token (wird auch für Grafana & Telegraf genutzt).
-   - `MQTT_*_TOPICS`: Wildcards, die alle Sensor-Topics abdecken. Standard deckt `iiot/+/sensor/+` ab.
+   - `MQTT_BROKER_HOST`, `MQTT_BROKER_PORT`, `MQTT_USERNAME`, `MQTT_PASSWORD`: Zugangsdaten des zentralen Brokers (ident mit dem Pico).
+   - `MQTT_BASE_TOPIC`, `MQTT_STATUS_TOPIC`, `MQTT_*_TOPICS`: Topic-Struktur, die sowohl Mock-Skript als auch Telegraf verwenden.
 
 3. Stack starten:
 
@@ -41,7 +42,7 @@ Dieses Verzeichnis enthält die containerisierte Referenzlösung, die die Sensor
    docker compose up -d
    ```
 
-   Der Broker lauscht auf `localhost:1883`, InfluxDB auf `localhost:8086`, Grafana auf `localhost:3000`.
+   InfluxDB lauscht auf `localhost:8086`, Grafana auf `localhost:3000`. Telegraf verbindet sich über die `.env`-Werte direkt mit dem externen MQTT-Broker; der lokale Mosquitto-Container kann optional mitlaufen, wird jedoch nicht benötigt.
 
 4. Status prüfen:
 
@@ -61,8 +62,8 @@ Dieses Verzeichnis enthält die containerisierte Referenzlösung, die die Sensor
 
 ## 4. Datenfluss & Erweiterbarkeit
 
-1. Sensoren publizieren JSON-Payloads (siehe Firmware) auf `telemetry_topic/temperature`, `telemetry_topic/humidity` und `status_topic`.
-2. Mosquitto verteilt die Messages. Telegraf lauscht per Wildcards, validiert das JSON und schreibt zwei Measurements in InfluxDB:
+1. Sensoren bzw. das Mock-Skript publizieren JSON-Payloads auf `telemetry_topic/temperature`, `telemetry_topic/humidity` und `status_topic` des externen Brokers.
+2. Telegraf lauscht mit den in `.env` gesetzten Wildcards (`iiot/group/ferge-peter/sensor/+` bzw. `/status`), validiert das JSON und schreibt zwei Measurements in InfluxDB:
    - `sensor_readings`: numerische Messwerte mit Tags `device_id`, `unit`, `topic`.
    - `sensor_status`: Statusmeldungen inkl. `status_code` (1 = online, 0 = rebooting/offline, −1 = error).
 3. Grafana liest direkt via Flux-Queries auf den Bucket. Neue Sensoren erscheinen automatisch, sobald ihr `device_id` Daten publiziert.
@@ -91,23 +92,22 @@ Dieses Verzeichnis enthält die containerisierte Referenzlösung, die die Sensor
 
 ## 7. Demo-Daten simulieren
 
-Falls kein Sensor aktiv ist, lassen sich Testdaten direkt über den Mosquitto-Container erzeugen. Das Skript `scripts/send_mock_mqtt.sh` publiziert Temperatur-, Luftfeuchte- sowie Status-JSONs auf die gleichen Topics, die Telegraf verarbeitet.
+Falls kein Sensor aktiv ist, lassen sich Testdaten direkt auf dem externen Broker erzeugen. Das Skript `scripts/send_mock_mqtt.sh` liest automatisch die `.env` ein und publiziert Temperatur-, Luftfeuchte- sowie Status-JSONs mit denselben Zugangsdaten wie der Raspberry Pi Pico.
 
 ```bash
 # Standardmäßig werden 5 Iterationen für zwei Geräte erzeugt (insgesamt 10 Messreihen)
 ./scripts/send_mock_mqtt.sh
 
 # Beispiel: 20 Iterationen für drei Geräte mit 1 s Abstand
-ITERATIONS=20 INTERVAL=1 DEVICES="device-001 device-002 device-003" ./scripts/send_mock_mqtt.sh
+ITERATIONS=20 INTERVAL=1 DEVICES="mock-001 mock-002 mock-003" ./scripts/send_mock_mqtt.sh
 ```
 
 Parameter (alle optional, via Umgebungsvariablen):
-- `BROKER_CONTAINER`: Name des Mosquitto-Containers (Default `iiot-mosquitto`).
-- `BASE_TOPIC`: Topic-Präfix (Default `iiot`).
-- `DEVICES`: Leerzeichen-separierte Device-IDs.
+- `MQTT_BASE_TOPIC`, `MQTT_STATUS_TOPIC`: überschreibt die in `.env` gesetzten Topics.
+- `DEVICES`: Leerzeichen-separierte Device-IDs (werden nur in den Payloads verwendet).
 - `ITERATIONS`: Wie oft pro Lauf Telemetrie- und Statuspakete erzeugt werden.
 - `INTERVAL`: Pause zwischen den Iterationen in Sekunden.
 
-Das Skript nutzt `docker exec`, daher muss Docker laufen und der Mosquitto-Container erreichbar sein. Nach dem Ausführen sollten InfluxDB & Grafana sofort Messwerte anzeigen.
+Das Skript nutzt `docker run eclipse-mosquitto` und verbindet sich – genau wie der Pico – direkt mit `MQTT_BROKER_HOST`. Dadurch müssen beim Umstieg auf echte Hardware keine Einstellungen geändert werden. Nach dem Ausführen sollten InfluxDB & Grafana sofort Messwerte anzeigen.
 
 Damit lässt sich die komplette Lösung mit wenigen Befehlen reproduzieren und auf einem handelsüblichen Laptop betreiben.
