@@ -1,0 +1,14 @@
+Pflichtinformationen für alle Pico-Sensoren
+------------------------------------------
+1. Basistopic für Messwerte: `iiot/group/<team>/sensor`
+   - Temperatur immer auf `<basistopic>/temperature`
+   - Luftfeuchte immer auf `<basistopic>/humidity`
+2. Statustopic: `iiot/group/<team>/sensor/status` (retain aktiv lassen).
+3. Payload-Format immer JSON mit ISO-8601-Zeitstempel (UTC) und eindeutiger `device_id`.
+   - Temperatur / Luftfeuchte:
+     `{"timestamp":"2024-05-05T10:15:00Z","device_id":"pico-01","unit":"°C","value":23.7,"topic":"iiot/group/<team>/sensor/temperature"}`
+     `{"timestamp":"2024-05-05T10:15:00Z","device_id":"pico-01","unit":"%","value":48.1,"topic":"iiot/group/<team>/sensor/humidity"}`
+   - Status (Timestamp bleibt enthalten; Telegraf nutzt trotzdem den Ingest-Zeitpunkt als Messzeit):
+     `{"timestamp":"2024-05-05T10:15:05Z","device_id":"pico-01","status":"online","topic":"iiot/group/<team>/sensor/status"}`
+4. Statuswerte bitte nur aus `online`, `ok`, `rebooting`, `offline`, `error` wählen, damit die Dashboards sie korrekt zählen.
+5. Device-IDs dürfen keine Leerzeichen enthalten; jedes Gerät braucht eine eigene ID und publiziert in den identischen Topics.

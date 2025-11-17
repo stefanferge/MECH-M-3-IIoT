@@ -112,7 +112,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: v.defaultBucket)\n  |> range(start: -7d)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"sensor_status\")\n  |> group(columns: [\"device_id\"])\n  |> last()\n  |> pivot(rowKey: [\"device_id\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> keep(columns: [\"_time\", \"device_id\", \"status\", \"status_code\"])\n  |> sort(columns: [\"_time\"], desc: true)"
+          "query": "status = from(bucket: v.defaultBucket)\n  |> range(start: -7d)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"sensor_status\")\n  |> filter(fn: (r) => r[\"_field\"] == \"status\")\n  |> group(columns: [\"device_id\"])\n  |> last()\n  |> keep(columns: [\"device_id\", \"_time\", \"_value\"])\n  |> rename(columns: {_value: \"status\", _time: \"status_time\"})\n\ncodes = from(bucket: v.defaultBucket)\n  |> range(start: -7d)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"sensor_status\")\n  |> filter(fn: (r) => r[\"_field\"] == \"status_code\")\n  |> group(columns: [\"device_id\"])\n  |> last()\n  |> keep(columns: [\"device_id\", \"_value\"])\n  |> rename(columns: {_value: \"status_code\"})\n\njoin(tables: {status: status, codes: codes}, on: [\"device_id\"], method: \"inner\")\n  |> map(fn: (r) => ({ r with _time: r.status_time }))\n  |> keep(columns: [\"_time\", \"device_id\", \"status\", \"status_code\"])\n  |> sort(columns: [\"_time\"], desc: true)"
         }
       ]
     }
