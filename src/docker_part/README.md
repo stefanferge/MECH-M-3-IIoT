@@ -62,7 +62,7 @@ Dieses Verzeichnis enthält die containerisierte Referenzlösung, die die Sensor
 
 ## 4. Datenfluss & Erweiterbarkeit
 
-1. Sensoren bzw. das Mock-Skript publizieren JSON-Payloads auf `telemetry_topic/temperature`, `telemetry_topic/humidity` und `status_topic` des externen Brokers.
+1. Sensoren bzw. das Mock-Skript publizieren JSON-Payloads auf `telemetry_topic/temperature`, `telemetry_topic/humidity` und `status_topic` des externen Brokers. Statusmeldungen enthalten weiterhin `timestamp`, `device_id` und `status`, Telegraf verwendet jedoch bewusst den Ankunftszeitpunkt als Messzeit, sodass falschgehende Echtzeituhren keine Panel-Aussetzer verursachen.
 2. Telegraf lauscht mit den in `.env` gesetzten Wildcards (`iiot/group/ferge-peter/sensor/+` bzw. `/status`), validiert das JSON und schreibt zwei Measurements in InfluxDB:
    - `sensor_readings`: numerische Messwerte mit Tags `device_id`, `unit`, `topic`.
    - `sensor_status`: Statusmeldungen inkl. `status_code` (1 = online, 0 = rebooting/offline, −1 = error).
