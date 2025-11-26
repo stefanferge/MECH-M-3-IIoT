@@ -78,6 +78,11 @@ try:
 except ImportError:  # pragma: no cover - running off-device
     digitalio = None
 
+try:
+    import adafruit_httpserver  # type: ignore
+except ImportError:
+    adafruit_httpserver = None
+
 # ===================================================================
 # KLASSE: ConfigManager
 # ===================================================================
@@ -584,434 +589,175 @@ class MqttClient:
 
 
 # ===================================================================
-# KLASSE: WebServer
+# KLASSE: WebServer (vereinfacht, nutzt adafruit_httpserver)
 # ===================================================================
 class WebServer:
     """
-    Stellt eine einfache HTTP-Schnittstelle zur Fernkonfiguration bereit.
+    Minimaler Webserver auf Basis von adafruit_httpserver.
+    Stellt /, /api/status und /api/config bereit.
     """
 
-    def __init__(self, config_manager: ConfigManager, network_manager: Any | None = None, mqtt_client: Any | None = None):
-        """
-        Initialisiert den Webserver.
-
-        :param config_manager: Eine Instanz des ConfigManagers, um Einstellungen
-                               zu lesen und zu speichern.
-        """
+    def __init__(self, config_manager: ConfigManager, network_manager: Any = None, mqtt_client: Any = None):
         self.config_manager = config_manager
-        self.port = 80
-        self._socket_pool: Any | None = None
-        self._listener: Any | None = None
-        self._last_client: Any | None = None
-        self._last_error: Exception | None = None
-        self._pending_reset = False
         self.network_manager = network_manager
         self.mqtt_client = mqtt_client
+        self.server = None
+        self._last_error = None
 
     def start(self):
-        """
-        Startet den Webserver, sodass er auf Anfragen lauscht.
-        """
-        if wifi is None:
-            raise RuntimeError("wifi-Modul ist nicht verfügbar. Läuft der Code auf der Pico W?")
-
-        if self._listener is not None:
+        if adafruit_httpserver is None or wifi is None:
+            raise RuntimeError("adafruit_httpserver oder wifi nicht verfügbar.")
+        if self.server is not None:
             return
+        try:
+            import socketpool  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError("socketpool-Modul ist nicht verfügbar.") from exc
+        pool = socketpool.SocketPool(wifi.radio)
+        self.server = adafruit_httpserver.Server(pool, "/static", debug=False)
 
-        if self._socket_pool is None:
+        @self.server.route("/")
+        def index(request):
             try:
-                import socketpool  # type: ignore
-            except ImportError as exc:  # pragma: no cover - abhängig von Firmware
-                raise RuntimeError("socketpool-Modul ist nicht verfügbar.") from exc
-            self._socket_pool = socketpool.SocketPool(wifi.radio)
+                settings = self.config_manager.load_settings()
+            except Exception:
+                settings = {}
+            rows = []
+            for key, value in settings.items():
+                rows.append(
+                    f"<label style='display:block;margin:6px 0'>{key}: "
+                    f"<input type='text' name='{key}' value=\"{value}\"></label>"
+                )
+            html = (
+                "<!DOCTYPE html><html><head><meta charset='utf-8'><title>IoT Einstellungen</title>"
+                "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                "<style>body{font-family:system-ui;max-width:720px;margin:20px}</style></head><body>"
+                "<h1>Geräteeinstellungen</h1>"
+                "<form method='POST'>"
+                f"{''.join(rows)}"
+                "<button type='submit'>Speichern &amp; Neustart</button>"
+                "</form>"
+                "<hr><p>API: <code>/api/status</code>, <code>/api/config</code></p>"
+                "</body></html>"
+            )
+            return adafruit_httpserver.Response(request, body=html, content_type="text/html")
 
-        sock = self._socket_pool.socket(self._socket_pool.AF_INET, self._socket_pool.SOCK_STREAM)
-        sock.settimeout(0)
-        sock.bind(("0.0.0.0", self.port))
-        sock.listen(2)
-        self._listener = sock
+        @self.server.route("/", methods=["POST"])
+        def save_config(request):
+            form = request.form_data
+            settings = self.config_manager.load_settings().copy()
+            for k, v in form.items():
+                settings[k] = v
+            self.config_manager.save_settings(settings)
+            # Nach save_settings folgt Reset, daher kein return nötig
+
+        @self.server.route("/api/status")
+        def api_status(request):
+            tm = getattr(time, "gmtime", time.localtime)()
+            y, m, d, hh, mm, ss, *_ = tm
+            iso = f"{y:04d}-{m:02d}-{d:02d}T{hh:02d}:{mm:02d}:{ss:02d}Z"
+            device_id = "unknown"
+            try:
+                cfg = self.config_manager.load_settings()
+                device_id = str(cfg.get("device_id", "unknown"))
+            except Exception:
+                pass
+            ip = None
+            if self.network_manager is not None:
+                try:
+                    ip = self.network_manager.get_ip()
+                except Exception:
+                    ip = None
+            status = None
+            if self.mqtt_client is not None:
+                try:
+                    status = getattr(self.mqtt_client, "_status", None)
+                except Exception:
+                    status = None
+            body = json.dumps({
+                "device_id": device_id,
+                "timestamp": iso,
+                "status": status or "ok",
+                "ip": ip,
+            })
+            return adafruit_httpserver.Response(request, body=body, content_type="application/json")
+
+        # --- Minimal /api/config endpoint for GET and PUT ---
+        @self.server.route("/api/config", methods=["GET"])
+        def api_get_config(request):
+            try:
+                settings = self.config_manager.load_settings()
+            except Exception as exc:
+                return adafruit_httpserver.Response(
+                    request,
+                    body=json.dumps({"error": str(exc)}),
+                    content_type="application/json",
+                    status="500"
+                )
+            # Only return relevant config keys
+            filtered = {
+                "sensor_pin": settings.get("sensor_pin"),
+                "reading_interval_seconds": settings.get("reading_interval_seconds"),
+            }
+            body = json.dumps(filtered)
+            return adafruit_httpserver.Response(request, body=body, content_type="application/json")
+
+        @self.server.route("/api/config", methods=["PUT"])
+        def api_put_config(request):
+            try:
+                data = request.json()
+            except Exception:
+                return adafruit_httpserver.Response(
+                    request,
+                    json.dumps({"error": "invalid_json"}),
+                    content_type="application/json"
+                )
+            allowed = {"sensor_pin", "reading_interval_seconds", "device_id"}
+            updates = {k: v for k, v in data.items() if k in allowed}
+            if not updates:
+                return adafruit_httpserver.Response(
+                    request,
+                    json.dumps({"error": "no_valid_keys"}),
+                    content_type="application/json"
+                )
+            # Update in-memory settings for the running instance
+            try:
+                if "reading_interval_seconds" in updates:
+                    global interval
+                    interval = float(updates["reading_interval_seconds"])
+                if "sensor_pin" in updates:
+                    global sensor
+                    sensor_pin = updates["sensor_pin"]
+                    sensor_type = settings.get("sensor_type", "DHT11")
+                    sensor = Sensor(sensor_pin, sensor_type)
+                if "device_id" in updates:
+                    settings["device_id"] = updates["device_id"]
+                    if mqtt is not None:
+                        mqtt.client_id = updates["device_id"]  # Update MQTT client ID
+                return adafruit_httpserver.Response(
+                    request,
+                    json.dumps({"status": "accepted", "rebooting": False}),
+                    content_type="application/json"
+                )
+            except Exception as exc:
+                return adafruit_httpserver.Response(
+                    request,
+                    json.dumps({"error": str(exc)}),
+                    content_type="application/json"
+                )
+
+        self.server.start(str(wifi.radio.ipv4_address))
+        print("Webserver läuft auf http://%s:80" % wifi.radio.ipv4_address)
 
     def poll(self):
-        """
-        Verarbeitet eine einzelne anstehende HTTP-Anfrage. Muss in der
-        Hauptschleife des Programms aufgerufen werden.
-        """
-        if self._listener is None:
-            return
-
-        try:
-            client, _ = self._listener.accept()
-        except OSError as exc:
-            # Kein Client wartet -> normal in Non-Blocking.
-            if getattr(exc, "errno", None) in (11, 110, 9):
-                return
-            if str(exc) in {"timed out", "EAGAIN"}:
-                return
-            self._last_error = exc
-            return
-
-        try:
-            # Kurz auf eingehende Daten warten und bis zum Headerende lesen
+        if self.server is not None:
             try:
-                client.settimeout(1)
-            except Exception:
-                pass
-            buf = bytearray()
-            header_end = -1
-            for _ in range(50):  # ~1s worst-case bei settimeout
-                try:
-                    chunk = client.recv(1024)
-                except Exception as _:
-                    break
-                if not chunk:
-                    break
-                buf.extend(chunk)
-                idx = buf.find(b"\r\n\r\n")
-                if idx != -1:
-                    header_end = idx
-                    break
-
-            # Falls kein Headerende gefunden, dennoch versuchen zu parsen
-            data = bytes(buf)
-
-            # Content-Length prüfen und ggf. Body nachladen (PUT/POST)
-            try:
-                header_text = data.decode("utf-8", "ignore")
-                first_line = header_text.split("\r\n", 1)[0]
-                parts = first_line.split(" ")
-                method = parts[0] if len(parts) >= 1 else "GET"
-                content_length = 0
-                for line in header_text.split("\r\n"):
-                    if line.lower().startswith("content-length:"):
-                        try:
-                            content_length = int(line.split(":", 1)[1].strip())
-                        except Exception:
-                            content_length = 0
-                        break
-                if header_end != -1 and content_length > 0 and method in ("POST", "PUT"):
-                    have = len(data) - (header_end + 4)
-                    to_read = content_length - max(0, have)
-                    while to_read > 0:
-                        try:
-                            chunk = client.recv(min(1024, to_read))
-                        except Exception:
-                            break
-                        if not chunk:
-                            break
-                        buf.extend(chunk)
-                        to_read -= len(chunk)
-                    data = bytes(buf)
-            except Exception:
-                pass
-
-            response = self._handle_request(data.decode("utf-8", "ignore"))
-            total = len(response)
-            sent = 0
-            while sent < total:
-                try:
-                    n = client.send(response[sent:sent+1024])
-                except Exception:
-                    break
-                if not n:
-                    break
-                sent += n
-        except Exception as exc:  # pragma: no cover - hardwareabhängig
-            self._last_error = exc
-        finally:
-            try:
-                client.close()
-            except Exception:  # pragma: no cover - best effort
-                pass
-            # optionaler Neustart nach API-Antwort
-            if self._pending_reset:
-                try:
-                    self._pending_reset = False
-                    if microcontroller is not None:
-                        microcontroller.reset()
-                except Exception:
-                    pass
-
-    def _handle_request(self, request: str) -> bytes:
-        """
-        Parst eine einfache HTTP-Anfrage und liefert die Antwort zurück.
-        Unterstützt GET und POST auf "/".
-        """
-        lines = request.split("\r\n")
-        if not lines:
-            return self._http_response(400, "Bad Request")
-
-        # Robuste Request-Line-Parsing (z. B. "GET /path HTTP/1.1")
-        try:
-            first_line = lines[0].strip()
-            parts = first_line.split()
-            if len(parts) < 2:
-                return self._http_response(400, "Bad Request")
-            method = parts[0]
-            path = parts[1]
-        except Exception:
-            return self._http_response(400, "Bad Request")
-
-        headers: dict[str, str] = {}
-        body = ""
-        separator_reached = False
-        for line in lines[1:]:
-            if line == "":
-                separator_reached = True
-                continue
-            if not separator_reached:
-                if ":" in line:
-                    key, value = line.split(":", 1)
-                    headers[key.strip().lower()] = value.strip()
-            else:
-                body += line + "\n"
-        body = body.rstrip("\n")
-
-        # REST JSON API
-        if path.startswith("/api/"):
-            if method == "OPTIONS":
-                return self._http_response(204, "", headers=self._cors_headers())
-            if path == "/api/config":
-                if method == "GET":
-                    return self._api_get_config()
-                if method == "PUT":
-                    return self._api_put_config(body, headers)
-                return self._json_error(405, "method_not_allowed", "Method Not Allowed")
-            if path == "/api/status":
-                if method == "GET":
-                    return self._api_get_status()
-                return self._json_error(405, "method_not_allowed", "Method Not Allowed")
-            return self._json_error(404, "not_found", "Not Found")
-
-        # HTML UI
-        if path == "/":
-            if method == "GET":
-                return self._handle_get_request()
-            if method == "POST":
-                return self._handle_post_request(body, headers)
-            return self._http_response(405, "Method Not Allowed")
-        return self._http_response(404, "Not Found")
-
-    def _handle_get_request(self, _request: Any | None = None) -> bytes:
-        """
-        Erstellt eine HTML-Seite mit den aktuellen Einstellungen.
-        """
-        try:
-            settings = self.config_manager.load_settings()
-        except Exception as exc:
-            # Fällt zurück auf leere Anzeige statt 500
-            settings = {}
-        
-        rows = []
-        for key, value in settings.items():
-            escaped_value = (
-                str(value)
-                .replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-                .replace('"', "&quot;")
-            )
-            rows.append(
-                f"<label style='display:block;margin:6px 0'>{key}: "
-                f"<input type='text' name='{key}' value=\"{escaped_value}\"></label>"
-            )
-        rows_html = "\n".join(rows) if rows else "<p><em>Keine Einstellungen gefunden.</em></p>"
-
-        html = (
-            "<!DOCTYPE html>"
-            "<html><head><meta charset='utf-8'><title>IoT Einstellungen</title>"
-            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-            "<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;"
-            "margin:20px;max-width:720px}.btn{padding:8px 12px;border:1px solid #ccc;"
-            "border-radius:8px;cursor:pointer}</style></head>"
-            "<body>"
-            "<h1>Geräteeinstellungen</h1>"
-            "<form method='POST' enctype='application/x-www-form-urlencoded'>"
-            f"{rows_html}"
-            "<button class='btn' type='submit'>Speichern &amp; Neustart</button>"
-            "</form>"
-            "<hr>"
-            "<p>Tipp: API-Status unter <code>/api/status</code>, Config lesen unter "
-            "<code>/api/config</code>, ändern via <code>PUT /api/config</code> (JSON).</p>"
-            "</body></html>"
-        )
-
-        return self._http_response(200, html, content_type="text/html")
-
-    def _cors_headers(self) -> dict[str, str]:
-        return {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET,PUT,POST,OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type",
-        }
-
-    def _api_get_config(self) -> bytes:
-        try:
-            settings = self.config_manager.load_settings()
-        except Exception as exc:
-            return self._json_error(500, "internal_error", str(exc))
-        body = json.dumps({"config": settings})
-        return self._http_response(200, body, content_type="application/json", headers=self._cors_headers())
-
-    def _api_put_config(self, body: str, headers: dict[str, str]) -> bytes:
-        ct = headers.get("content-type", "").lower()
-        if "application/json" not in ct:
-            return self._json_error(415, "unsupported_media_type", "Expected application/json")
-        try:
-            data = json.loads(body) if body else {}
-        except Exception:
-            return self._json_error(400, "invalid_json", "Body is not valid JSON")
-
-        if not isinstance(data, dict):
-            return self._json_error(400, "invalid_request", "JSON object expected")
-
-        updates = data.get("config") if "config" in data else data
-        if not isinstance(updates, dict) or not updates:
-            return self._json_error(400, "invalid_request", "No config fields provided")
-
-        try:
-            settings = self.config_manager.load_settings().copy()
-            settings.update(updates)
-            serialized = self.config_manager._dump_toml(settings)
-            with open(self.config_manager.filepath, "wb") as f:
-                f.write(serialized)
-            self._pending_reset = True
-        except Exception as exc:
-            return self._json_error(500, "internal_error", str(exc))
-
-        body_resp = json.dumps({"status": "accepted", "rebooting": True})
-        headers = self._cors_headers()
-        return self._http_response(202, body_resp, content_type="application/json", headers=headers)
-
-    def _api_get_status(self) -> bytes:
-        tm = getattr(time, "gmtime", time.localtime)()
-        y, m, d, hh, mm, ss, *_ = tm
-        iso = f"{y:04d}-{m:02d}-{d:02d}T{hh:02d}:{mm:02d}:{ss:02d}Z"
-
-        device_id = "unknown"
-        try:
-            cfg = self.config_manager.load_settings()
-            device_id = str(cfg.get("device_id", "unknown"))
-        except Exception:
-            pass
-
-        ip = None
-        if self.network_manager is not None:
-            try:
-                ip = self.network_manager.get_ip()
-            except Exception:
-                ip = None
-        status = None
-        if self.mqtt_client is not None:
-            try:
-                status = getattr(self.mqtt_client, "_status", None)
-            except Exception:
-                status = None
-        body = json.dumps({
-            "device_id": device_id,
-            "timestamp": iso,
-            "status": status or "ok",
-            "ip": ip,
-        })
-        return self._http_response(200, body, content_type="application/json", headers=self._cors_headers())
-
-    def _handle_post_request(self, body: str, headers: dict[str, str] | None = None) -> bytes:
-        """
-        Parst die Formulardaten, speichert sie und leitet zurück zur Startseite.
-        """
-        headers = headers or {}
-        content_type = headers.get("content-type", "")
-        if "application/x-www-form-urlencoded" not in content_type:
-            return self._http_response(415, "Unsupported Media Type")
-
-        updates = self._parse_form_urlencoded(body)
-        if not updates:
-            return self._http_response(400, "Keine Daten empfangen.")
-
-        settings = self.config_manager.load_settings().copy()
-        settings.update(updates)
-        self.config_manager.save_settings(settings)
-
-        # Wenn save_settings nicht zurückkehrt (wegen Reset), passiert das hier nicht.
-        return self._http_response(
-            303,
-            "Einstellungen gespeichert. Gerät wird neu gestartet.",
-            headers={"Location": "/"},
-        )
-
-    def _parse_form_urlencoded(self, body: str) -> dict:
-        """
-        Parst eine application/x-www-form-urlencoded Nutzlast.
-        """
-        result: dict[str, str] = {}
-        for pair in body.split("&"):
-            if not pair:
-                continue
-            if "=" in pair:
-                key, value = pair.split("=", 1)
-            else:
-                key, value = pair, ""
-            decoded_key = self._url_decode(key)
-            decoded_value = self._url_decode(value)
-            result[decoded_key] = decoded_value
-        return result
-
-    def _url_decode(self, value: str) -> str:
-        """
-        Dekodiert URL-kodierte Strings (z.B. %20 -> Leerzeichen).
-        """
-        value = value.replace("+", " ")
-        parts: list[str] = []
-        i = 0
-        while i < len(value):
-            if value[i] == "%" and i + 2 < len(value):
-                hex_value = value[i + 1 : i + 3]
-                try:
-                    parts.append(chr(int(hex_value, 16)))
-                    i += 3
-                    continue
-                except ValueError:
-                    pass
-            parts.append(value[i])
-            i += 1
-        return "".join(parts)
-
-    def _http_response(self, status_code: int, body: str, *, content_type: str = "text/plain", headers: dict[str, str] | None = None) -> bytes:
-        """
-        Baut eine einfache HTTP/1.1-Antwort zusammen.
-        """
-        reason_phrases = {
-            200: "OK",
-            303: "See Other",
-            400: "Bad Request",
-            404: "Not Found",
-            405: "Method Not Allowed",
-            415: "Unsupported Media Type",
-            500: "Internal Server Error",
-        }
-        reason = reason_phrases.get(status_code, "OK")
-        header_lines = [
-            f"HTTP/1.1 {status_code} {reason}",
-            f"Content-Type: {content_type}; charset=utf-8",
-            f"Content-Length: {len(body.encode('utf-8'))}",
-            "Connection: close",
-        ]
-        if headers:
-            for key, value in headers.items():
-                header_lines.append(f"{key}: {value}")
-        header_lines.append("")
-        response_str = "\r\n".join(header_lines) + "\r\n" + body
-        return response_str.encode("utf-8")
-
-    def _json_error(self, status: int, code: str, message: str) -> bytes:
-        body = json.dumps({"error": {"code": code, "message": message}})
-        headers = self._cors_headers()
-        return self._http_response(status, body, content_type="application/json", headers=headers)
+                self.server.poll()
+            except Exception as e:
+                self._last_error = e
 
     @property
-    def last_error(self) -> Exception | None:
-        """
-        Liefert den zuletzt aufgetretenen Webserver-Fehler.
-        """
+    def last_error(self):
         return self._last_error
 
 
@@ -1127,9 +873,130 @@ else:
 web = None
 if net is not None:
   try:
-    web = WebServer(cfg, network_manager=net, mqtt_client=mqtt)
+    # MinimalWebServer: Nur /status, robustes Routing, explizite Methoden
+    class MinimalWebServer:
+        def __init__(self, config_manager, network_manager=None, mqtt_client=None):
+            self.config_manager = config_manager
+            self.network_manager = network_manager
+            self.mqtt_client = mqtt_client
+            self.server = None
+            self._last_error = None
+
+        def start(self):
+            if adafruit_httpserver is None or wifi is None:
+                raise RuntimeError("adafruit_httpserver oder wifi nicht verfügbar.")
+            if self.server is not None:
+                return
+            import socketpool  # type: ignore
+            pool = socketpool.SocketPool(wifi.radio)
+            self.server = adafruit_httpserver.Server(pool, "/static", debug=True)
+
+            @self.server.route("/status", methods=["GET"])
+            def status_handler(request):
+                tm = getattr(time, "gmtime", time.localtime)()
+                y, m, d, hh, mm, ss, *_ = tm
+                iso = f"{y:04d}-{m:02d}-{d:02d}T{hh:02d}:{mm:02d}:{ss:02d}Z"
+                device_id = settings.get("device_id", "unknown")  # Use in-memory device_id
+                ip = None
+                if self.network_manager is not None:
+                    try:
+                        ip = self.network_manager.get_ip()
+                    except Exception:
+                        ip = None
+                status = None
+                if self.mqtt_client is not None:
+                    try:
+                        status = getattr(self.mqtt_client, "_status", None)
+                    except Exception:
+                        status = None
+                body = json.dumps({
+                    "device_id": device_id,
+                    "timestamp": iso,
+                    "status": status or "ok",
+                    "ip": ip,
+                })
+                return adafruit_httpserver.Response(request, body=body, content_type="application/json")
+
+            # --- Minimal /api/config endpoint for GET and PUT ---
+            @self.server.route("/api/config", methods=["GET"])
+            def api_get_config(request):
+                try:
+                    settings = self.config_manager.load_settings()
+                except Exception as exc:
+                    return adafruit_httpserver.Response(
+                        request,
+                        body=json.dumps({"error": str(exc)}),
+                        content_type="application/json",
+                        status="500"
+                    )
+                # Only return relevant config keys
+                filtered = {
+                    "sensor_pin": settings.get("sensor_pin"),
+                    "reading_interval_seconds": settings.get("reading_interval_seconds"),
+                }
+                body = json.dumps(filtered)
+                return adafruit_httpserver.Response(request, body=body, content_type="application/json")
+
+            @self.server.route("/api/config", methods=["PUT"])
+            def api_put_config(request):
+                try:
+                    data = request.json()
+                except Exception:
+                    return adafruit_httpserver.Response(
+                        request,
+                        json.dumps({"error": "invalid_json"}),
+                        content_type="application/json"
+                    )
+                allowed = {"sensor_pin", "reading_interval_seconds", "device_id"}
+                updates = {k: v for k, v in data.items() if k in allowed}
+                if not updates:
+                    return adafruit_httpserver.Response(
+                        request,
+                        json.dumps({"error": "no_valid_keys"}),
+                        content_type="application/json"
+                    )
+                # Update in-memory settings for the running instance
+                try:
+                    if "reading_interval_seconds" in updates:
+                        global interval
+                        interval = float(updates["reading_interval_seconds"])
+                    if "sensor_pin" in updates:
+                        global sensor
+                        sensor_pin = updates["sensor_pin"]
+                        sensor_type = settings.get("sensor_type", "DHT11")
+                        sensor = Sensor(sensor_pin, sensor_type)
+                    if "device_id" in updates:
+                        settings["device_id"] = updates["device_id"]
+                        if mqtt is not None:
+                            mqtt.client_id = updates["device_id"]  # Update MQTT client ID
+                    return adafruit_httpserver.Response(
+                        request,
+                        json.dumps({"status": "accepted", "rebooting": False}),
+                        content_type="application/json"
+                    )
+                except Exception as exc:
+                    return adafruit_httpserver.Response(
+                        request,
+                        json.dumps({"error": str(exc)}),
+                        content_type="application/json"
+                    )
+
+            self.server.start(str(wifi.radio.ipv4_address))
+            print("Minimal Webserver läuft auf http://%s:80/status" % wifi.radio.ipv4_address)
+
+        def poll(self):
+            if self.server is not None:
+                try:
+                    self.server.poll()
+                except Exception as e:
+                    self._last_error = e
+
+        @property
+        def last_error(self):
+            return self._last_error
+
+    web = MinimalWebServer(cfg, network_manager=net, mqtt_client=mqtt)
     web.start()
-    print("Webserver läuft auf Port 80")
   except Exception as e:
     print("Webserver-Fehler:", e)
     web = None

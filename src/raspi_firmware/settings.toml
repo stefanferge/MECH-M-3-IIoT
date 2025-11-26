@@ -22,9 +22,10 @@ location = "Produktionshalle 1, Innsbruck"
 #wifi_ssid = "IBKPongau"
 #wifi_password = "JohannGoldegg6020!"
 
-wifi_ssid = "iot-wlan-2024"
-wifi_password = "mci_lecture&42"
-
+#wifi_ssid = "iot-wlan-2024"
+#wifi_password = "mci_lecture&42"
+wifi_ssid = "WIN-IoT"
+wifi_password = "000000xxxxxx"
 
 # --- MQTT Broker Einstellungen ---
 # Die Adresse des zentralen Servers (Broker), an den die Daten gesendet werden.
