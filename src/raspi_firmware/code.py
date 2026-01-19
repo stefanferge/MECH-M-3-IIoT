@@ -14,7 +14,6 @@
 # ----------- Bibliotheken importieren ----------- 
 # Hier werden später alle benötigten CircuitPython-Bibliotheken importiert
 # z.B. import board, time, wifi, adafruit_dht, etc.
-
 import json
 import os
 import time
@@ -133,11 +132,29 @@ class ConfigManager:
 
         :param settings: Das Dictionary mit den zu speichernden Einstellungen.
         """
+        # Try to remount RW on CircuitPython
+        try:
+            import storage  # type: ignore
+            storage.remount("/", False)  # False => read/write
+        except Exception:
+            pass
+
         self._settings_cache = settings.copy()
         serialized = self._dump_toml(settings)
 
-        with open(self.filepath, "wb") as file:
-            file.write(serialized)
+        # Safer write
+        tmp_path = self.filepath + ".tmp"
+        try:
+            with open(tmp_path, "wb") as f:
+                f.write(serialized)
+            try:
+                os.remove(self.filepath)
+            except Exception:
+                pass
+            os.rename(tmp_path, self.filepath)
+        except OSError as exc:
+            # Propagate so API can respond with filesystem_readonly
+            raise
 
         if microcontroller is not None:
             microcontroller.reset()
@@ -589,179 +606,6 @@ class MqttClient:
 
 
 # ===================================================================
-# KLASSE: WebServer (vereinfacht, nutzt adafruit_httpserver)
-# ===================================================================
-class WebServer:
-    """
-    Minimaler Webserver auf Basis von adafruit_httpserver.
-    Stellt /, /api/status und /api/config bereit.
-    """
-
-    def __init__(self, config_manager: ConfigManager, network_manager: Any = None, mqtt_client: Any = None):
-        self.config_manager = config_manager
-        self.network_manager = network_manager
-        self.mqtt_client = mqtt_client
-        self.server = None
-        self._last_error = None
-
-    def start(self):
-        if adafruit_httpserver is None or wifi is None:
-            raise RuntimeError("adafruit_httpserver oder wifi nicht verfügbar.")
-        if self.server is not None:
-            return
-        try:
-            import socketpool  # type: ignore
-        except ImportError as exc:
-            raise RuntimeError("socketpool-Modul ist nicht verfügbar.") from exc
-        pool = socketpool.SocketPool(wifi.radio)
-        self.server = adafruit_httpserver.Server(pool, "/static", debug=False)
-
-        @self.server.route("/")
-        def index(request):
-            try:
-                settings = self.config_manager.load_settings()
-            except Exception:
-                settings = {}
-            rows = []
-            for key, value in settings.items():
-                rows.append(
-                    f"<label style='display:block;margin:6px 0'>{key}: "
-                    f"<input type='text' name='{key}' value=\"{value}\"></label>"
-                )
-            html = (
-                "<!DOCTYPE html><html><head><meta charset='utf-8'><title>IoT Einstellungen</title>"
-                "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-                "<style>body{font-family:system-ui;max-width:720px;margin:20px}</style></head><body>"
-                "<h1>Geräteeinstellungen</h1>"
-                "<form method='POST'>"
-                f"{''.join(rows)}"
-                "<button type='submit'>Speichern &amp; Neustart</button>"
-                "</form>"
-                "<hr><p>API: <code>/api/status</code>, <code>/api/config</code></p>"
-                "</body></html>"
-            )
-            return adafruit_httpserver.Response(request, body=html, content_type="text/html")
-
-        @self.server.route("/", methods=["POST"])
-        def save_config(request):
-            form = request.form_data
-            settings = self.config_manager.load_settings().copy()
-            for k, v in form.items():
-                settings[k] = v
-            self.config_manager.save_settings(settings)
-            # Nach save_settings folgt Reset, daher kein return nötig
-
-        @self.server.route("/api/status")
-        def api_status(request):
-            tm = getattr(time, "gmtime", time.localtime)()
-            y, m, d, hh, mm, ss, *_ = tm
-            iso = f"{y:04d}-{m:02d}-{d:02d}T{hh:02d}:{mm:02d}:{ss:02d}Z"
-            device_id = "unknown"
-            try:
-                cfg = self.config_manager.load_settings()
-                device_id = str(cfg.get("device_id", "unknown"))
-            except Exception:
-                pass
-            ip = None
-            if self.network_manager is not None:
-                try:
-                    ip = self.network_manager.get_ip()
-                except Exception:
-                    ip = None
-            status = None
-            if self.mqtt_client is not None:
-                try:
-                    status = getattr(self.mqtt_client, "_status", None)
-                except Exception:
-                    status = None
-            body = json.dumps({
-                "device_id": device_id,
-                "timestamp": iso,
-                "status": status or "ok",
-                "ip": ip,
-            })
-            return adafruit_httpserver.Response(request, body=body, content_type="application/json")
-
-        # --- Minimal /api/config endpoint for GET and PUT ---
-        @self.server.route("/api/config", methods=["GET"])
-        def api_get_config(request):
-            try:
-                settings = self.config_manager.load_settings()
-            except Exception as exc:
-                return adafruit_httpserver.Response(
-                    request,
-                    body=json.dumps({"error": str(exc)}),
-                    content_type="application/json",
-                    status="500"
-                )
-            # Only return relevant config keys
-            filtered = {
-                "sensor_pin": settings.get("sensor_pin"),
-                "reading_interval_seconds": settings.get("reading_interval_seconds"),
-            }
-            body = json.dumps(filtered)
-            return adafruit_httpserver.Response(request, body=body, content_type="application/json")
-
-        @self.server.route("/api/config", methods=["PUT"])
-        def api_put_config(request):
-            try:
-                data = request.json()
-            except Exception:
-                return adafruit_httpserver.Response(
-                    request,
-                    json.dumps({"error": "invalid_json"}),
-                    content_type="application/json"
-                )
-            allowed = {"sensor_pin", "reading_interval_seconds", "device_id"}
-            updates = {k: v for k, v in data.items() if k in allowed}
-            if not updates:
-                return adafruit_httpserver.Response(
-                    request,
-                    json.dumps({"error": "no_valid_keys"}),
-                    content_type="application/json"
-                )
-            # Update in-memory settings for the running instance
-            try:
-                if "reading_interval_seconds" in updates:
-                    global interval
-                    interval = float(updates["reading_interval_seconds"])
-                if "sensor_pin" in updates:
-                    global sensor
-                    sensor_pin = updates["sensor_pin"]
-                    sensor_type = settings.get("sensor_type", "DHT11")
-                    sensor = Sensor(sensor_pin, sensor_type)
-                if "device_id" in updates:
-                    settings["device_id"] = updates["device_id"]
-                    if mqtt is not None:
-                        mqtt.client_id = updates["device_id"]  # Update MQTT client ID
-                return adafruit_httpserver.Response(
-                    request,
-                    json.dumps({"status": "accepted", "rebooting": False}),
-                    content_type="application/json"
-                )
-            except Exception as exc:
-                return adafruit_httpserver.Response(
-                    request,
-                    json.dumps({"error": str(exc)}),
-                    content_type="application/json"
-                )
-
-        self.server.start(str(wifi.radio.ipv4_address))
-        print("Webserver läuft auf http://%s:80" % wifi.radio.ipv4_address)
-
-    def poll(self):
-        if self.server is not None:
-            try:
-                self.server.poll()
-            except Exception as e:
-                self._last_error = e
-
-    @property
-    def last_error(self):
-        return self._last_error
-
-
-# ===================================================================
 # MAIN-LOGIK
 # ===================================================================
 
@@ -802,7 +646,7 @@ except Exception as e:
       "mqtt_password": "",
       "mqtt_keepalive": 60,
       "mqtt_use_ssl": False,
-      # ⚠️ Pin kann Zahl (22) oder String ("GP22") sein – beides wird unterstützt
+      # Pin kann Zahl (22) oder String ("GP22") sein – beides wird unterstützt
       "sensor_pin": 9,          # GP9 ist Default; passe an, falls Kabel an GP22 steckt
       "sensor_type": "DHT11",  # oder "DHT22"
       "reading_interval_seconds": 2,
@@ -889,14 +733,14 @@ if net is not None:
                 return
             import socketpool  # type: ignore
             pool = socketpool.SocketPool(wifi.radio)
-            self.server = adafruit_httpserver.Server(pool, "/static", debug=True)
+            self.server = adafruit_httpserver.Server(pool, "/static", debug=False)
 
-            @self.server.route("/status", methods=["GET"])
+            # Handlers definieren
             def status_handler(request):
                 tm = getattr(time, "gmtime", time.localtime)()
                 y, m, d, hh, mm, ss, *_ = tm
                 iso = f"{y:04d}-{m:02d}-{d:02d}T{hh:02d}:{mm:02d}:{ss:02d}Z"
-                device_id = settings.get("device_id", "unknown")  # Use in-memory device_id
+                device_id = settings.get("device_id", "unknown")
                 ip = None
                 if self.network_manager is not None:
                     try:
@@ -917,27 +761,16 @@ if net is not None:
                 })
                 return adafruit_httpserver.Response(request, body=body, content_type="application/json")
 
-            # --- Minimal /api/config endpoint for GET and PUT ---
-            @self.server.route("/api/config", methods=["GET"])
             def api_get_config(request):
-                try:
-                    settings = self.config_manager.load_settings()
-                except Exception as exc:
-                    return adafruit_httpserver.Response(
-                        request,
-                        body=json.dumps({"error": str(exc)}),
-                        content_type="application/json",
-                        status="500"
-                    )
-                # Only return relevant config keys
+                # Use current in-memory settings instead of reloading from disk
                 filtered = {
                     "sensor_pin": settings.get("sensor_pin"),
                     "reading_interval_seconds": settings.get("reading_interval_seconds"),
+                    "device_id": settings.get("device_id", "unknown"),
                 }
                 body = json.dumps(filtered)
                 return adafruit_httpserver.Response(request, body=body, content_type="application/json")
 
-            @self.server.route("/api/config", methods=["PUT"])
             def api_put_config(request):
                 try:
                     data = request.json()
@@ -947,6 +780,7 @@ if net is not None:
                         json.dumps({"error": "invalid_json"}),
                         content_type="application/json"
                     )
+
                 allowed = {"sensor_pin", "reading_interval_seconds", "device_id"}
                 updates = {k: v for k, v in data.items() if k in allowed}
                 if not updates:
@@ -955,31 +789,92 @@ if net is not None:
                         json.dumps({"error": "no_valid_keys"}),
                         content_type="application/json"
                     )
-                # Update in-memory settings for the running instance
+
+                # Normalize some types
+                if "reading_interval_seconds" in updates:
+                    try:
+                        updates["reading_interval_seconds"] = float(updates["reading_interval_seconds"])
+                    except Exception:
+                        return adafruit_httpserver.Response(
+                            request,
+                            json.dumps({"error": "invalid_reading_interval_seconds"}),
+                            content_type="application/json",
+                            status="400"
+                        )
+
+                # Update in-memory so it takes effect immediately
+                for k, v in updates.items():
+                    settings[k] = v
+
+                # Try to persist; if FS is read-only, keep in-memory only
                 try:
-                    if "reading_interval_seconds" in updates:
-                        global interval
-                        interval = float(updates["reading_interval_seconds"])
-                    if "sensor_pin" in updates:
-                        global sensor
-                        sensor_pin = updates["sensor_pin"]
-                        sensor_type = settings.get("sensor_type", "DHT11")
-                        sensor = Sensor(sensor_pin, sensor_type)
-                    if "device_id" in updates:
-                        settings["device_id"] = updates["device_id"]
-                        if mqtt is not None:
-                            mqtt.client_id = updates["device_id"]  # Update MQTT client ID
+                    self.config_manager.save_settings(settings)
                     return adafruit_httpserver.Response(
                         request,
-                        json.dumps({"status": "accepted", "rebooting": False}),
+                        json.dumps({"status": "accepted", "persisted": True, "rebooting": True}),
                         content_type="application/json"
+                    )
+                except OSError as exc:
+                    err = getattr(exc, "errno", None)
+                    if err is None and exc.args:
+                        try:
+                            err = int(exc.args[0])
+                        except Exception:
+                            err = None
+                    readonly = (err == 30) or ("read-only" in str(exc).lower())
+                    if readonly:
+                        return adafruit_httpserver.Response(
+                            request,
+                            json.dumps({
+                                "status": "accepted",
+                                "persisted": False,
+                                "rebooting": False,
+                                "in_memory": True,
+                                "error": "filesystem_readonly"
+                            }),
+                            content_type="application/json"
+                        )
+                    return adafruit_httpserver.Response(
+                        request,
+                        json.dumps({"error": str(exc), "persisted": False}),
+                        content_type="application/json",
+                        status="500"
                     )
                 except Exception as exc:
                     return adafruit_httpserver.Response(
                         request,
                         json.dumps({"error": str(exc)}),
-                        content_type="application/json"
+                        content_type="application/json",
+                        status="500"
                     )
+
+            def fs_status_handler(request):
+                info = {}
+                # readonly flag
+                try:
+                    import storage  # type: ignore
+                    m = storage.getmount("/")
+                    info["readonly"] = getattr(m, "readonly", None)
+                except Exception:
+                    info["readonly"] = "unknown"
+                # boot_out.txt may indicate safe mode reason
+                try:
+                    boot_out = None
+                    if "boot_out.txt" in os.listdir("/"):
+                        with open("/boot_out.txt", "r") as f:
+                            boot_out = f.read()
+                    info["boot_out"] = boot_out
+                except Exception:
+                    info["boot_out"] = None
+                return adafruit_httpserver.Response(
+                    request, body=json.dumps(info), content_type="application/json"
+                )
+
+            # Routes REGISTRIEREN, dann starten
+            self.server.route("/status", methods=["GET"])(status_handler)
+            self.server.route("/config", methods=["GET"])(api_get_config)
+            self.server.route("/config", methods=["POST"])(api_put_config)
+            self.server.route("/fs", methods=["GET"])(fs_status_handler)
 
             self.server.start(str(wifi.radio.ipv4_address))
             print("Minimal Webserver läuft auf http://%s:80/status" % wifi.radio.ipv4_address)
@@ -1002,7 +897,6 @@ if net is not None:
     web = None
 
 # 7) Hauptschleife – liest in Intervallen und gibt am Terminal aus
-interval = float(settings.get("reading_interval_seconds", 2))
 last_send = 0.0
 
 while True:
@@ -1023,42 +917,43 @@ while True:
       except Exception as e:
         print("Webserver poll Fehler:", e)
 
-    # Mess-Intervall prüfen
+    # Mess-Intervall prüfen (read dynamically from settings)
     now = time.monotonic()
-    if now - last_send >= interval:
-      data = sensor.read_data()
-      if data:
-        # Terminal-Ausgabe
-        print(f"Temp: {data['temperature']}°C, Humidity: {data['humidity']}%")
-        # optional LED blinken
-        if led is not None:
-          led.value = True
-          time.sleep(0.05)
-          led.value = False
-        # optional an MQTT senden
-        if mqtt is not None and settings.get("telemetry_topic"):
-          try:
-            # Erfolgreiche Messung: Status auf ok setzen, dann senden
+    interval_cur = float(settings.get("reading_interval_seconds", 2))
+    if now - last_send >= interval_cur:
+        data = sensor.read_data()
+        if data:
+          # Terminal-Ausgabe
+          print(f"Temp: {data['temperature']}°C, Humidity: {data['humidity']}%")
+          # optional LED blinken
+          if led is not None:
+            led.value = True
+            time.sleep(0.05)
+            led.value = False
+          # optional an MQTT senden
+          if mqtt is not None and settings.get("telemetry_topic"):
             try:
-              mqtt.publish_status("ok")
-            except Exception:
-              pass
-            mqtt.publish_telemetry(data)
-          except Exception as e:
-            print("MQTT publish Fehler:", e)
+              # Erfolgreiche Messung: Status auf ok setzen, dann senden
+              try:
+                mqtt.publish_status("ok")
+              except Exception:
+                pass
+              mqtt.publish_telemetry(data)
+            except Exception as e:
+              print("MQTT publish Fehler:", e)
+              try:
+                mqtt.publish_status("error")
+              except Exception:
+                pass
+        else:
+          # Fehlermeldung aus Sensor-Layer anzeigen
+          print("Sensor liefert keine Werte:", sensor.last_error)
+          if mqtt is not None:
             try:
               mqtt.publish_status("error")
             except Exception:
               pass
-      else:
-        # Fehlermeldung aus Sensor-Layer anzeigen
-        print("Sensor liefert keine Werte:", sensor.last_error)
-        if mqtt is not None:
-          try:
-            mqtt.publish_status("error")
-          except Exception:
-            pass
-      last_send = now
+        last_send = now
 
     # kleine Pause, damit die Schleife CPU schont
     time.sleep(0.05)
