@@ -6,11 +6,11 @@
 
 ## Vorstellung der Aufgabenstellung
 
-- [ ] Sie bereiten eine containerisierte Lösung vor, die sowohl eine Datenbank (z.B. InfluxDB, SQLite, Arrow etc.) als auch eine Visualisierungskomponente (z.B. Grafana, etc.) beinhaltet. Bei der Auswahl der Technologien sind Sie frei, achten Sie jedoch darauf, dass die Lösung ressourcenschonend ist und auf einem typischen Laptop ausgeführt werden kann.
-- [ ] Die Lösung soll so gestaltet sein, dass sie mit minimalen Aufwand gestartet werden kann (z.B. über ein `docker-compose.yml` Datei).
-- [ ] Die Lösung soll die Daten aller verbundenen Sensoren speichern und auch offen für zukünftige Sensoren sein und diese ohne zusätzlichen Konfigurationsaufwand integrieren.
-- [ ] Neben der Visualisierung der Zeitreihen-Daten, soll die Lösung auch eine übersicht über die verbundenen Sensoren bieten (z.B. Anzahl der Sensoren, letzte Verbindung, etc.).
-- [ ] Bearbeiten sie die Dokumentation so auf, dass ein Nutzer die Anpassung der Config den Mikrocontroller in ein bestehendes WLAN einbinden kann und die kontainersierte Lösung starten und nutzen kann.
+- [x] Sie bereiten eine containerisierte Lösung vor, die sowohl eine Datenbank (z.B. InfluxDB, SQLite, Arrow etc.) als auch eine Visualisierungskomponente (z.B. Grafana, etc.) beinhaltet. Bei der Auswahl der Technologien sind Sie frei, achten Sie jedoch darauf, dass die Lösung ressourcenschonend ist und auf einem typischen Laptop ausgeführt werden kann.
+- [x] Die Lösung soll so gestaltet sein, dass sie mit minimalen Aufwand gestartet werden kann (z.B. über ein `docker-compose.yml` Datei).
+- [x] Die Lösung soll die Daten aller verbundenen Sensoren speichern und auch offen für zukünftige Sensoren sein und diese ohne zusätzlichen Konfigurationsaufwand integrieren.
+- [x] Neben der Visualisierung der Zeitreihen-Daten, soll die Lösung auch eine übersicht über die verbundenen Sensoren bieten (z.B. Anzahl der Sensoren, letzte Verbindung, etc.).
+- [x] Bearbeiten sie die Dokumentation so auf, dass ein Nutzer die Anpassung der Config den Mikrocontroller in ein bestehendes WLAN einbinden kann und die kontainersierte Lösung starten und nutzen kann.
 
 # Assynchrone Inhalte
 
