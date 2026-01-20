@@ -702,13 +702,12 @@ if net is not None:
                 return adafruit_httpserver.Response(request, body=body, content_type="application/json")
 
             def api_get_config(request):
-                # Use current in-memory settings instead of reloading from disk
-                filtered = {
-                    "sensor_pin": settings.get("sensor_pin"),
-                    "reading_interval_seconds": settings.get("reading_interval_seconds"),
-                    "device_id": settings.get("device_id", "unknown"),
-                }
-                body = json.dumps(filtered)
+                interval_val = settings.get("reading_interval_seconds", 0)
+                try:
+                    interval_val = int(interval_val)
+                except Exception:
+                    interval_val = 0
+                body = json.dumps({"interval": interval_val})
                 return adafruit_httpserver.Response(request, body=body, content_type="application/json")
 
             def api_put_config(request):
@@ -718,37 +717,32 @@ if net is not None:
                     return adafruit_httpserver.Response(
                         request,
                         json.dumps({"error": "invalid_json"}),
-                        content_type="application/json"
+                        content_type="application/json",
+                        status="400"
                     )
 
-                allowed = {"sensor_pin", "reading_interval_seconds", "device_id"}
-                updates = {k: v for k, v in data.items() if k in allowed}
-                if not updates:
+                if not isinstance(data, dict) or "interval" not in data:
                     return adafruit_httpserver.Response(
                         request,
-                        json.dumps({"error": "no_valid_keys"}),
-                        content_type="application/json"
+                        json.dumps({"error": "missing_interval"}),
+                        content_type="application/json",
+                        status="400"
                     )
 
-                # Normalize some types
-                if "reading_interval_seconds" in updates:
-                    try:
-                        updates["reading_interval_seconds"] = float(updates["reading_interval_seconds"])
-                    except Exception:
-                        return adafruit_httpserver.Response(
-                            request,
-                            json.dumps({"error": "invalid_reading_interval_seconds"}),
-                            content_type="application/json",
-                            status="400"
-                        )
+                try:
+                    interval_val = int(data["interval"])
+                except Exception:
+                    return adafruit_httpserver.Response(
+                        request,
+                        json.dumps({"error": "invalid_interval"}),
+                        content_type="application/json",
+                        status="400"
+                    )
 
-                # Update in-memory settings
-                for k, v in updates.items():
-                    settings[k] = v
-
+                settings["reading_interval_seconds"] = interval_val
                 return adafruit_httpserver.Response(
                     request,
-                    json.dumps({"status": "accepted", "persisted": False, "in_memory": True}),
+                    json.dumps({"interval": interval_val}),
                     content_type="application/json"
                 )
 
