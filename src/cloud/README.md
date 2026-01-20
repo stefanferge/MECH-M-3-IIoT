@@ -23,13 +23,8 @@ Dieses Verzeichnis enthält die containerisierte Referenzlösung, die die Sensor
 
 ## 2. Docker-Umgebung konfigurieren
 
-1. Ins Verzeichnis `src/docker_part` wechseln.
-2. Eine `.env` auf Basis der Vorlage anlegen:
-
-   ```bash
-   cp .env.example .env
-   # Werte wie Token/Passwörter anpassen (mindestens INFLUXDB_TOKEN ändern)
-   ```
+1. Ins Verzeichnis `src/cloud` wechseln.
+2. Die vorhandene `.env` anpassen (mindestens `INFLUXDB_TOKEN` ändern).
 
    Relevante Variablen:
    - `INFLUXDB_*`: Organisation, Bucket, Admin-User/-Passwort, API-Token (wird auch für Grafana & Telegraf genutzt).
