@@ -87,7 +87,7 @@ except ImportError:
 # ===================================================================
 class ConfigManager:
     """
-    Verwaltet das Laden und Speichern der Konfiguration aus der 'settings.toml'.
+    Verwaltet das Laden der Konfiguration aus der 'settings.toml'.
     """
 
     def __init__(self, filepath: str):
@@ -125,40 +125,6 @@ class ConfigManager:
         self._settings_cache = settings
         return settings
 
-    def save_settings(self, settings: dict):
-        """
-        Speichert Änderungen zurück in die TOML-Datei und startet den
-        Mikrocontroller neu, um die neuen Einstellungen zu übernehmen.
-
-        :param settings: Das Dictionary mit den zu speichernden Einstellungen.
-        """
-        # Try to remount RW on CircuitPython
-        try:
-            import storage  # type: ignore
-            storage.remount("/", False)  # False => read/write
-        except Exception:
-            pass
-
-        self._settings_cache = settings.copy()
-        serialized = self._dump_toml(settings)
-
-        # Safer write
-        tmp_path = self.filepath + ".tmp"
-        try:
-            with open(tmp_path, "wb") as f:
-                f.write(serialized)
-            try:
-                os.remove(self.filepath)
-            except Exception:
-                pass
-            os.rename(tmp_path, self.filepath)
-        except OSError as exc:
-            # Propagate so API can respond with filesystem_readonly
-            raise
-
-        if microcontroller is not None:
-            microcontroller.reset()
-
     def _parse_minimal_toml(self, content: str) -> dict[str, Any]:
         """
         Minimaler TOML-Parser für einfache key=value Konfigurationen.
@@ -195,32 +161,6 @@ class ConfigManager:
             return int(value)
         except ValueError:
             return value
-
-    def _dump_toml(self, settings: dict) -> bytes:
-        """
-        Serialisiert das Settings-Dict in TOML.
-        """
-        if _toml_writer is not None:
-            return _toml_writer.dumps(settings).encode("utf-8")
-
-        lines: list[str] = []
-        for key, value in settings.items():
-            lines.append(f"{key} = {self._format_value(value)}")
-        lines.append("")  # sorgt für abschließenden Zeilenumbruch
-        return "\n".join(lines).encode("utf-8")
-
-    def _format_value(self, value: Any) -> str:
-        """
-        Formatiert einen Python-Wert in die TOML-Schreibweise.
-        """
-        if isinstance(value, str):
-            escaped = value.replace('"', '\\"')
-            return f'"{escaped}"'
-        if isinstance(value, bool):
-            return "true" if value else "false"
-        if isinstance(value, (int, float)):
-            return str(value)
-        raise TypeError(f"Der Wert für TOML wird nicht unterstützt: {value!r}")
 
 
 # ===================================================================
@@ -802,51 +742,15 @@ if net is not None:
                             status="400"
                         )
 
-                # Update in-memory so it takes effect immediately
+                # Update in-memory settings
                 for k, v in updates.items():
                     settings[k] = v
 
-                # Try to persist; if FS is read-only, keep in-memory only
-                try:
-                    self.config_manager.save_settings(settings)
-                    return adafruit_httpserver.Response(
-                        request,
-                        json.dumps({"status": "accepted", "persisted": True, "rebooting": True}),
-                        content_type="application/json"
-                    )
-                except OSError as exc:
-                    err = getattr(exc, "errno", None)
-                    if err is None and exc.args:
-                        try:
-                            err = int(exc.args[0])
-                        except Exception:
-                            err = None
-                    readonly = (err == 30) or ("read-only" in str(exc).lower())
-                    if readonly:
-                        return adafruit_httpserver.Response(
-                            request,
-                            json.dumps({
-                                "status": "accepted",
-                                "persisted": False,
-                                "rebooting": False,
-                                "in_memory": True,
-                                "error": "filesystem_readonly"
-                            }),
-                            content_type="application/json"
-                        )
-                    return adafruit_httpserver.Response(
-                        request,
-                        json.dumps({"error": str(exc), "persisted": False}),
-                        content_type="application/json",
-                        status="500"
-                    )
-                except Exception as exc:
-                    return adafruit_httpserver.Response(
-                        request,
-                        json.dumps({"error": str(exc)}),
-                        content_type="application/json",
-                        status="500"
-                    )
+                return adafruit_httpserver.Response(
+                    request,
+                    json.dumps({"status": "accepted", "persisted": False, "in_memory": True}),
+                    content_type="application/json"
+                )
 
             def fs_status_handler(request):
                 info = {}
@@ -876,8 +780,8 @@ if net is not None:
             self.server.route("/config", methods=["POST"])(api_put_config)
             self.server.route("/fs", methods=["GET"])(fs_status_handler)
 
-            self.server.start(str(wifi.radio.ipv4_address))
-            print("Minimal Webserver läuft auf http://%s:80/status" % wifi.radio.ipv4_address)
+            self.server.start(str(wifi.radio.ipv4_address), port=80)
+            print("Minimal Webserver läuft auf http://%s/status" % wifi.radio.ipv4_address)
 
         def poll(self):
             if self.server is not None:
