@@ -6,13 +6,69 @@ Hier ist Platz für ihre Dokumentation. Dieses Dokument ist in [Quarto](https://
 :::
 
 ## Zusammenfassung der Aufgabenstellung und Ziele
+Ziel ist eine funktionsfaehige IoT-Loesung mit Raspberry Pi Pico W, die Sensordaten per MQTT sendet, eine HTTP-API fuer Konfiguration/Status bereitstellt und eine containerisierte Cloud-Umgebung zur Speicherung und Visualisierung liefert.
 
+Relevante Dateien:
+- Firmware: `src/raspi_firmware/code.py`
+- Konfiguration: `src/raspi_firmware/settings.toml`
+- MQTT-Spezifikation: `docs/iot-specs/asyncapi.yaml`
+- HTTP-API-Spezifikation: `docs/iot-specs/openapi.yaml`
+- Cloud-Stack: `src/cloud/docker-compose.yml`
+- Cloud-Dokumentation: `src/cloud/README.md`
 
 ## Anleitung für User
 
 ### Konfiguration und Start des Mikrocontrollers
 
+1. Pico per USB verbinden (Laufwerk `CIRCUITPY`).
+2. Datei `src/raspi_firmware/code.py` und `src/raspi_firmware/settings.toml` auf den Pico kopieren.
+3. In `settings.toml` folgende Werte anpassen:
+   - `wifi_ssid`, `wifi_password`
+   - `device_id`
+   - `telemetry_topic`, `status_topic`
+   - `broker_address` (MQTT-Broker), `broker_port`
+4. Pico neu starten. Nach erfolgreicher WLAN-Verbindung ist die HTTP-API unter `http://<device-ip>/status` und `http://<device-ip>/config` erreichbar.
+5. Die Geraete-IP kann im Router nachgesehen oder im Seriellen Monitor (USB) ausgelesen werden.
+
+Beispielantworten:
+
+```json
+GET /status
+{
+  "device_id": "Pico-Sensor-Ferge-Peter",
+  "timestamp": "2025-01-20T15:45:00Z",
+  "status": "ok",
+  "ip": "192.168.137.146"
+}
+```
+
+```json
+GET /config
+{
+  "interval": 2
+}
+```
+
 ### Empfehlungen für die IT-Abteilung
+
+- MQTT (TCP 1883) muss in der Firewall/Whitelist vom Standortnetz zum Broker erlaubt sein (Zielhost: `broker_address` aus `settings.toml`).
+- Optional: NTP (UDP 123) zu `pool.ntp.org`, falls die Uhrzeit synchronisiert werden soll.
+- HTTP-API ist unverschluesselt und nur fuer lokale Wartung gedacht. Remote-Zugriff nur ueber VPN, SSH-Tunnel oder Reverse-Proxy mit Authentifizierung; ansonsten wird davon abgeraten.
+- Risiken: Offene Ports im internen Netz, fehlende TLS-Verschluesselung, potenziell ungesicherte Config-Aenderungen. Empfohlen: Zugriff nur aus einem Wartungs-VLAN oder per temporaerer Freigabe.
+
+### Containerisierte Loesung starten
+
+1. Ins Verzeichnis `src/cloud` wechseln.
+2. `.env` anlegen (siehe `src/cloud/.env` als Vorlage) und mindestens `INFLUXDB_TOKEN` anpassen.
+3. Starten:
+
+```bash
+docker compose up -d
+```
+
+4. UIs:
+   - InfluxDB: `http://localhost:8086`
+   - Grafana: `http://localhost:3000` (Login siehe `src/cloud/README.md`)
 
 
 ## Anleitung für Developer
@@ -21,6 +77,20 @@ Hier ist Platz für ihre Dokumentation. Dieses Dokument ist in [Quarto](https://
 - Für Dokumentation wurde [Quarto](https://quarto.org/) verwendet, die `quarto-cli`-Befehle sind ebenfalls in der `pdm`-Umgebung verfügbar.
     - Führen Sie `quarto preview` im `docs`-Verzeichnis aus, um die Dokumentation lokal zu starten.
     - Zudem existiert eine github-action zur automatischen Erstellung der Dokumentation, die diese auch automatisch als Website bereitstellt, wenn Sie in den Main-Branch pushen. Wenn sie diese entfernen wollen, müssen sie die Datei `.github/workflows/publish.yml` anpassen.
+
+### HTTP-API Tests
+
+Die HTTP-API wird mit Python `unittest` getestet. Standardmäßig ist die Base-URL im Test auf `http://192.168.137.146` gesetzt und kann über eine Umgebungsvariable überschrieben werden.
+
+```bash
+python3 -m unittest tests/test_http_api.py
+```
+
+Alternative Base-URL:
+
+```bash
+IOT_BASE_URL=http://<device-ip> python3 -m unittest tests/test_http_api.py
+```
 
 ### Struktur des Projekts
 
